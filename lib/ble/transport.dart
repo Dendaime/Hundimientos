@@ -12,13 +12,15 @@ import '../game/models.dart';
 import 'protocol.dart';
 
 /// Custom 128-bit UUIDs for Hundimientos BLE GATT service.
-const String kGameServiceUuid = '7a1b0001-4c2d-4e3f-9a5b-6c7d8e9f0001';
+/// Uppercase is required because iOS CoreBluetooth `CBUUID.uuidString` is uppercase
+/// and `ble_peripheral` uses exact string comparison.
+const String kGameServiceUuid = '7A1B0001-4C2D-4E3F-9A5B-6C7D8E9F0001';
 
 /// Host -> Client (Notify)
-const String kTxCharUuid = '7a1b0002-4c2d-4e3f-9a5b-6c7d8e9f0001';
+const String kTxCharUuid = '7A1B0002-4C2D-4E3F-9A5B-6C7D8E9F0001';
 
 /// Client -> Host (Write)
-const String kRxCharUuid = '7a1b0003-4c2d-4e3f-9a5b-6c7d8e9f0001';
+const String kRxCharUuid = '7A1B0003-4C2D-4E3F-9A5B-6C7D8E9F0001';
 
 enum TransportStatus {
   idle,
