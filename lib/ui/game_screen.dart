@@ -2,18 +2,27 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-import '../audio/bgm_service.dart';
+import '../audio/sfx_service.dart';
 import '../ble/protocol.dart';
 import '../ble/transport.dart';
 import '../game/game_board.dart';
 import '../game/models.dart';
 import 'board_widget.dart';
+import 'tactical_widgets.dart';
 
 enum _GamePhase {
   placing,
   waitingOpponentReady,
   battle,
   finished,
+}
+
+class _BannerData {
+  final String title;
+  final String subtitle;
+  final BannerKind kind;
+
+  const _BannerData(this.title, this.subtitle, this.kind);
 }
 
 class GameScreen extends StatefulWidget {
@@ -36,14 +45,22 @@ class _GameScreenState extends State<GameScreen> {
 
   _GamePhase _phase = _GamePhase.placing;
   bool _horizontal = true;
-  int _nextShipIndex = 0;
+  ShipSpec? _selectedSpec = kFleetSpecs.first;
+  (int, int)? _previewAnchor;
 
   bool _myReady = false;
   bool _opponentReady = false;
   bool _isMyTurn = false;
   bool _awaitingResult = false;
   bool? _didWin;
-  String _statusText = 'Coloca tu flota en el tablero';
+
+  (int, int)? _targetedCell;
+  (int, int)? _lastEnemyShotOnMe;
+  (int, int)? _lastMyShotOnEnemy;
+
+  String _statusText = 'Despliega tu flota en el tablero';
+  _BannerData? _activeBanner;
+  Timer? _bannerTimer;
 
   StreamSubscription<GameMessage>? _msgSub;
   StreamSubscription<TransportStatus>? _statusSub;
@@ -56,7 +73,10 @@ class _GameScreenState extends State<GameScreen> {
     _statusSub = widget.transport.statusStream.listen((status) {
       if (status == TransportStatus.disconnected && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('El otro jugador se desconectó.')),
+          const SnackBar(
+            backgroundColor: NavalPalette.enemyRed,
+            content: Text('Conexión perdida: el otro jugador se desconectó.'),
+          ),
         );
       }
     });
@@ -64,10 +84,47 @@ class _GameScreenState extends State<GameScreen> {
 
   @override
   void dispose() {
+    _bannerTimer?.cancel();
     _msgSub?.cancel();
     _statusSub?.cancel();
     widget.transport.dispose();
     super.dispose();
+  }
+
+  void _showBanner(String title, String subtitle, BannerKind kind) {
+    _bannerTimer?.cancel();
+    setState(() {
+      _activeBanner = _BannerData(title, subtitle, kind);
+    });
+    _bannerTimer = Timer(const Duration(milliseconds: 1650), () {
+      if (mounted) {
+        setState(() => _activeBanner = null);
+      }
+    });
+  }
+
+  ShipSpec? _firstUnplacedSpec() {
+    for (final spec in kFleetSpecs) {
+      if (!_myBoard.hasPlacedSpec(spec.id)) return spec;
+    }
+    return null;
+  }
+
+  PlacementPreview? _buildCurrentPreview() {
+    if (_phase != _GamePhase.placing ||
+        _selectedSpec == null ||
+        _previewAnchor == null) {
+      return null;
+    }
+    final (r, c) = _previewAnchor!;
+    final valid = _myBoard.canPlace(_selectedSpec!, r, c, _horizontal);
+    return PlacementPreview(
+      spec: _selectedSpec!,
+      row: r,
+      col: c,
+      horizontal: _horizontal,
+      isValid: valid,
+    );
   }
 
   void _onMessage(GameMessage msg) {
@@ -79,6 +136,7 @@ class _GameScreenState extends State<GameScreen> {
       } else if (msg is ResetMessage) {
         _resetLocalState();
       } else if (msg is ShotMessage) {
+        _lastEnemyShotOnMe = (msg.row, msg.col);
         final result = _myBoard.receiveShot(msg.row, msg.col);
         widget.transport.send(
           ShotResultMessage(
@@ -91,22 +149,34 @@ class _GameScreenState extends State<GameScreen> {
             sunkLength: result.sunkShip?.spec.length,
           ),
         );
-        if (result.outcome == ShotOutcome.win) {
-          _phase = _GamePhase.finished;
-          _didWin = false;
-          _statusText = '¡Derrota! Hundieron toda tu flota.';
-        } else {
-          _isMyTurn = true;
-          _statusText = switch (result.outcome) {
-            ShotOutcome.miss => 'El enemigo falló. ¡Tu turno!',
-            ShotOutcome.hit => '¡Te dieron! Tu turno.',
-            ShotOutcome.sunk =>
-              '¡Hundieron tu ${result.sunkShip?.spec.name ?? "barco"}! Tu turno.',
-            ShotOutcome.win => 'Derrota',
-          };
+
+        switch (result.outcome) {
+          case ShotOutcome.miss:
+            SfxService.instance.play(SfxType.miss);
+            _isMyTurn = true;
+            _statusText = 'El enemigo falló. ¡Tu turno de fuego!';
+            _showBanner('¡DISPARO FALLADO!', 'El enemigo dio en agua. ¡Tu turno!', BannerKind.miss);
+          case ShotOutcome.hit:
+            SfxService.instance.play(SfxType.hit);
+            _isMyTurn = true;
+            _statusText = '¡Nos han impactado! Tu turno.';
+            _showBanner('¡NOS DIERON!', 'Impacto enemigo en tu flota', BannerKind.hit);
+          case ShotOutcome.sunk:
+            SfxService.instance.play(SfxType.sunk);
+            _isMyTurn = true;
+            final shipName = result.sunkShip?.spec.name ?? 'buque';
+            _statusText = '¡Hundieron tu $shipName! Tu turno.';
+            _showBanner('¡BUQUE PERDIDO!', 'Hundieron tu $shipName', BannerKind.sunk);
+          case ShotOutcome.win:
+            SfxService.instance.play(SfxType.defeat);
+            _phase = _GamePhase.finished;
+            _didWin = false;
+            _statusText = 'Derrota: toda tu flota fue hundida.';
         }
       } else if (msg is ShotResultMessage) {
         _awaitingResult = false;
+        _targetedCell = null;
+        _lastMyShotOnEnemy = (msg.row, msg.col);
         _enemyBoard.recordTrackingResult(
           msg.row,
           msg.col,
@@ -116,18 +186,28 @@ class _GameScreenState extends State<GameScreen> {
           sunkHorizontal: msg.sunkHorizontal,
           sunkLength: msg.sunkLength,
         );
-        if (msg.outcome == ShotOutcome.win) {
-          _phase = _GamePhase.finished;
-          _didWin = true;
-          _statusText = '¡Victoria! Hundiste toda la flota enemiga.';
-        } else {
-          _isMyTurn = false;
-          _statusText = switch (msg.outcome) {
-            ShotOutcome.miss => 'Agua. Turno del oponente...',
-            ShotOutcome.hit => '¡Tocado! Turno del oponente...',
-            ShotOutcome.sunk => '¡Hundido! Turno del oponente...',
-            ShotOutcome.win => '¡Victoria!',
-          };
+
+        switch (msg.outcome) {
+          case ShotOutcome.miss:
+            SfxService.instance.play(SfxType.miss);
+            _isMyTurn = false;
+            _statusText = 'Agua. Esperando ataque enemigo...';
+            _showBanner('¡AGUA!', 'Sin impacto en esas coordenadas', BannerKind.miss);
+          case ShotOutcome.hit:
+            SfxService.instance.play(SfxType.hit);
+            _isMyTurn = false;
+            _statusText = '¡Impacto confirmado! Turno enemigo...';
+            _showBanner('¡IMPACTO!', 'Fuego directo sobre nave enemiga', BannerKind.hit);
+          case ShotOutcome.sunk:
+            SfxService.instance.play(SfxType.sunk);
+            _isMyTurn = false;
+            _statusText = '¡Barco enemigo hundido! Turno enemigo...';
+            _showBanner('¡HUNDIDO!', 'Nave enemiga enviada al fondo', BannerKind.sunk);
+          case ShotOutcome.win:
+            SfxService.instance.play(SfxType.victory);
+            _phase = _GamePhase.finished;
+            _didWin = true;
+            _statusText = '¡Victoria naval! Armada enemiga destruida.';
         }
       }
     });
@@ -137,37 +217,98 @@ class _GameScreenState extends State<GameScreen> {
     if (_myReady && _opponentReady) {
       _phase = _GamePhase.battle;
       _isMyTurn = widget.transport.isHost;
-      _statusText =
-          _isMyTurn ? '¡Tu turno! Dispara al tablero enemigo.' : 'Turno del oponente...';
+      _statusText = _isMyTurn
+          ? '¡Tu turno! Selecciona coordenadas para disparar.'
+          : 'Turno del comandante enemigo...';
+      _showBanner(
+        '¡COMBATE INICIADO!',
+        _isMyTurn ? 'Tienes el primer disparo' : 'Prepárate para el ataque enemigo',
+        BannerKind.info,
+      );
     }
   }
 
-  void _onPlacementTap(int row, int col) {
-    if (_nextShipIndex >= kFleetSpecs.length) return;
-    final spec = kFleetSpecs[_nextShipIndex];
-    if (_myBoard.placeShip(spec, row, col, _horizontal)) {
+  void _onPlacementCellTap(int row, int col) {
+    final spec = _selectedSpec;
+    if (spec == null) return;
+
+    // If user taps an already valid preview anchor or taps a valid spot, place immediately
+    // If invalid, show the red preview so the user clearly sees why it doesn't fit!
+    if (_myBoard.canPlace(spec, row, col, _horizontal)) {
+      SfxService.instance.play(SfxType.place);
       setState(() {
-        _nextShipIndex++;
-        if (_nextShipIndex >= kFleetSpecs.length) {
-          _statusText = 'Flota lista. Pulsa "¡Listo!" para comenzar.';
+        _myBoard.placeShip(spec, row, col, _horizontal);
+        _previewAnchor = null;
+        _selectedSpec = _firstUnplacedSpec();
+        if (_myBoard.allShipsPlaced) {
+          _statusText = '¡Flota desplegada! Pulsa "A LA BATALLA".';
+        } else {
+          _statusText = 'Despliega: ${_selectedSpec!.name} (${_selectedSpec!.length} casillas)';
         }
+      });
+    } else {
+      SfxService.instance.play(SfxType.select);
+      setState(() {
+        _previewAnchor = (row, col);
+        _statusText = 'Posición inválida: fuera de límites o superpuesta';
       });
     }
   }
 
+  void _onPlacementDrag(int row, int col) {
+    if (_selectedSpec == null) return;
+    if (_previewAnchor != (row, col)) {
+      setState(() {
+        _previewAnchor = (row, col);
+      });
+    }
+  }
+
+  void _onPlacementDragEnd() {
+    final spec = _selectedSpec;
+    final anchor = _previewAnchor;
+    if (spec == null || anchor == null) return;
+    if (_myBoard.canPlace(spec, anchor.$1, anchor.$2, _horizontal)) {
+      _onPlacementCellTap(anchor.$1, anchor.$2);
+    }
+  }
+
+  void _toggleOrientation() {
+    SfxService.instance.play(SfxType.rotate);
+    setState(() {
+      _horizontal = !_horizontal;
+    });
+  }
+
+  void _selectDockShip(ShipSpec spec) {
+    SfxService.instance.play(SfxType.select);
+    setState(() {
+      if (_myBoard.hasPlacedSpec(spec.id)) {
+        _myBoard.removeShip(spec.id);
+      }
+      _selectedSpec = spec;
+      _previewAnchor = null;
+      _statusText = 'Colocando ${spec.name} (${spec.length} casillas)';
+    });
+  }
+
   void _randomizeFleet() {
+    SfxService.instance.play(SfxType.place);
     setState(() {
       _myBoard.randomize();
-      _nextShipIndex = kFleetSpecs.length;
-      _statusText = 'Flota aleatoria lista. Pulsa "¡Listo!" para comenzar.';
+      _selectedSpec = null;
+      _previewAnchor = null;
+      _statusText = '¡Formación aleatoria lista! Pulsa "A LA BATALLA".';
     });
   }
 
   void _clearFleet() {
+    SfxService.instance.play(SfxType.select);
     setState(() {
       _myBoard.clear();
-      _nextShipIndex = 0;
-      _statusText = 'Coloca tu flota en el tablero';
+      _selectedSpec = kFleetSpecs.first;
+      _previewAnchor = null;
+      _statusText = 'Despliega tu flota en el tablero';
     });
   }
 
@@ -175,8 +316,9 @@ class _GameScreenState extends State<GameScreen> {
     if (!_myBoard.allShipsPlaced) return;
     setState(() {
       _myReady = true;
+      _previewAnchor = null;
       _phase = _GamePhase.waitingOpponentReady;
-      _statusText = 'Esperando a que el otro jugador esté listo...';
+      _statusText = 'Esperando confirmación del comandante enemigo...';
       _tryStartBattle();
     });
     widget.transport.send(const ReadyMessage());
@@ -186,9 +328,11 @@ class _GameScreenState extends State<GameScreen> {
     if (_phase != _GamePhase.battle || !_isMyTurn || _awaitingResult) return;
     if (_enemyBoard.grid[row][col] != CellState.empty) return;
 
+    SfxService.instance.play(SfxType.fire);
     setState(() {
+      _targetedCell = (row, col);
       _awaitingResult = true;
-      _statusText = 'Disparando...';
+      _statusText = '¡Fuego en curso! Esperando impacto...';
     });
     widget.transport.send(ShotMessage(row: row, col: col));
   }
@@ -202,94 +346,209 @@ class _GameScreenState extends State<GameScreen> {
     _myBoard.clear();
     _enemyBoard.clear();
     _phase = _GamePhase.placing;
-    _nextShipIndex = 0;
+    _selectedSpec = kFleetSpecs.first;
+    _previewAnchor = null;
     _myReady = false;
     _opponentReady = false;
     _awaitingResult = false;
     _didWin = null;
+    _targetedCell = null;
+    _lastEnemyShotOnMe = null;
+    _lastMyShotOnEnemy = null;
+    _activeBanner = null;
     _isMyTurn = widget.transport.isHost;
-    _statusText = 'Coloca tu flota en el tablero';
+    _statusText = 'Despliega tu flota en el tablero';
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      extendBodyBehindAppBar: false,
       appBar: AppBar(
-        title: Text(widget.title),
-        actions: [
-          ValueListenableBuilder<bool>(
-            valueListenable: BgmService.instance.isMuted,
-            builder: (context, muted, _) {
-              return IconButton(
-                tooltip: muted ? 'Activar música' : 'Silenciar música',
-                icon: Icon(muted ? Icons.volume_off : Icons.volume_up),
-                onPressed: BgmService.instance.toggleMute,
-              );
-            },
-          ),
-        ],
-      ),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Column(
-            children: [
-              // Status banner
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                decoration: BoxDecoration(
-                  color: _bannerColor(),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Text(
-                  _statusText,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w600,
-                    fontSize: 15,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              Expanded(
-                child: _phase == _GamePhase.placing ||
-                        _phase == _GamePhase.waitingOpponentReady
-                    ? _buildPlacementView()
-                    : _buildBattleView(),
-              ),
-            ],
+        title: Text(
+          widget.title.toUpperCase(),
+          style: const TextStyle(
+            fontSize: 15,
+            fontWeight: FontWeight.w900,
+            letterSpacing: 1.4,
           ),
         ),
+        actions: const [TacticalAudioActions()],
+      ),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          // Atmospheric ocean backdrop
+          Image.asset(
+            'assets/images/ocean_bg.png',
+            fit: BoxFit.cover,
+            filterQuality: FilterQuality.none,
+          ),
+          Container(color: NavalPalette.deepOcean.withValues(alpha: 0.72)),
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+              child: Column(
+                children: [
+                  // Gameloft-style dual health HUD
+                  TacticalHealthHud(
+                    myRemainingSegments: _myBoard.remainingSegments,
+                    enemyRemainingSegments: _enemyBoard.remainingSegments,
+                    myRemainingShips: _myBoard.remainingShipsCount,
+                    enemyRemainingShips: _enemyBoard.remainingShipsCount,
+                    isMyTurn: _isMyTurn,
+                    inBattle: _phase == _GamePhase.battle,
+                  ),
+                  const SizedBox(height: 8),
+                  // Compact tactical status strip
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 7,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0A1A2B).withValues(alpha: 0.9),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(
+                        color: _phase == _GamePhase.battle && _isMyTurn
+                            ? NavalPalette.radarGreen
+                            : NavalPalette.steelBorder,
+                        width: 1.2,
+                      ),
+                    ),
+                    child: Text(
+                      _statusText,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                        color: _phase == _GamePhase.battle && _isMyTurn
+                            ? NavalPalette.radarGreen
+                            : Colors.white,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Expanded(
+                    child: _phase == _GamePhase.placing ||
+                            _phase == _GamePhase.waitingOpponentReady
+                        ? _buildPlacementView()
+                        : _buildBattleView(),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          // Pop-up event banner (IMPACTO / AGUA / HUNDIDO)
+          if (_activeBanner != null)
+            TacticalEventBanner(
+              title: _activeBanner!.title,
+              subtitle: _activeBanner!.subtitle,
+              kind: _activeBanner!.kind,
+            ),
+          // Full Victory / Defeat overlay
+          if (_phase == _GamePhase.finished && _didWin != null)
+            MissionEndOverlay(
+              didWin: _didWin!,
+              myRemainingShips: _myBoard.remainingShipsCount,
+              enemySunkShips: _enemyBoard.sunkShipsCount,
+              onRematch: _requestRematch,
+              onExit: () => Navigator.of(context).pop(),
+            ),
+        ],
       ),
     );
   }
 
-  Color _bannerColor() {
-    if (_phase == _GamePhase.finished) {
-      return _didWin == true ? Colors.green.shade800 : Colors.red.shade900;
-    }
-    if (_phase == _GamePhase.battle && _isMyTurn) {
-      return Colors.teal.shade800;
-    }
-    return const Color(0xFF16324F);
-  }
-
   Widget _buildPlacementView() {
-    final currentSpec = _nextShipIndex < kFleetSpecs.length
-        ? kFleetSpecs[_nextShipIndex]
-        : null;
-
     return Column(
       children: [
-        if (currentSpec != null)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Text(
-              'Colocando: ${currentSpec.name} (${currentSpec.length} casillas) — ${_horizontal ? "Horizontal" : "Vertical"}',
-              style: const TextStyle(color: Colors.white70),
-            ),
+        // Interactive ship dock with pixel-art thumbnails
+        SizedBox(
+          height: 64,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: kFleetSpecs.length,
+            separatorBuilder: (_, _) => const SizedBox(width: 8),
+            itemBuilder: (context, index) {
+              final spec = kFleetSpecs[index];
+              final isPlaced = _myBoard.hasPlacedSpec(spec.id);
+              final isSelected = _selectedSpec?.id == spec.id;
+
+              return GestureDetector(
+                onTap: _phase == _GamePhase.placing
+                    ? () => _selectDockShip(spec)
+                    : null,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 160),
+                  width: 96,
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: isSelected
+                        ? NavalPalette.steelMid
+                        : const Color(0xFF0C1C2D).withValues(alpha: 0.9),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: isSelected
+                          ? NavalPalette.tacticalAmber
+                          : (isPlaced
+                              ? NavalPalette.radarGreen.withValues(alpha: 0.65)
+                              : NavalPalette.steelBorder),
+                      width: isSelected ? 2 : 1.1,
+                    ),
+                  ),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Expanded(
+                        child: Opacity(
+                          opacity: isPlaced ? 0.45 : 1.0,
+                          child: Image.asset(
+                            spec.spritePath,
+                            fit: BoxFit.contain,
+                            filterQuality: FilterQuality.none,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          if (isPlaced)
+                            const Padding(
+                              padding: EdgeInsets.only(right: 3),
+                              child: Icon(
+                                Icons.check_circle,
+                                size: 11,
+                                color: NavalPalette.radarGreen,
+                              ),
+                            ),
+                          Flexible(
+                            child: Text(
+                              '${spec.name} (${spec.length})',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 9,
+                                fontWeight: FontWeight.w800,
+                                color: isSelected
+                                    ? NavalPalette.tacticalAmber
+                                    : Colors.white70,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
           ),
+        ),
+        const SizedBox(height: 8),
+        // Placement board with green/red ghost preview & drag support
         Expanded(
           child: Center(
             child: ConstrainedBox(
@@ -297,45 +556,78 @@ class _GameScreenState extends State<GameScreen> {
               child: BoardWidget(
                 board: _myBoard,
                 showShips: true,
-                interactive: _phase == _GamePhase.placing && currentSpec != null,
-                onCellTap: _onPlacementTap,
+                interactive:
+                    _phase == _GamePhase.placing && _selectedSpec != null,
+                onCellTap: _onPlacementCellTap,
+                onCellHoverOrDrag: _onPlacementDrag,
+                onDragEnd: _onPlacementDragEnd,
+                placementPreview: _buildCurrentPreview(),
               ),
             ),
           ),
         ),
-        const SizedBox(height: 12),
-        if (_phase == _GamePhase.placing)
+        const SizedBox(height: 10),
+        if (_phase == _GamePhase.placing) ...[
           Wrap(
-            spacing: 10,
+            spacing: 8,
             runSpacing: 8,
             alignment: WrapAlignment.center,
             children: [
-              OutlinedButton.icon(
-                onPressed: () => setState(() => _horizontal = !_horizontal),
-                icon: const Icon(Icons.rotate_right),
-                label: Text(_horizontal ? 'Horizontal' : 'Vertical'),
+              TacticalButton(
+                compact: true,
+                label: _horizontal ? 'Horizontal' : 'Vertical',
+                icon: Icons.rotate_right,
+                accentColor: NavalPalette.cyanAccent,
+                onPressed: _toggleOrientation,
               ),
-              OutlinedButton.icon(
+              TacticalButton(
+                compact: true,
+                label: 'Aleatorio',
+                icon: Icons.shuffle,
+                accentColor: NavalPalette.tacticalAmber,
                 onPressed: _randomizeFleet,
-                icon: const Icon(Icons.shuffle),
-                label: const Text('Aleatorio'),
               ),
-              OutlinedButton.icon(
+              TacticalButton(
+                compact: true,
+                label: 'Limpiar',
+                icon: Icons.delete_outline,
+                accentColor: NavalPalette.enemyRed,
                 onPressed: _clearFleet,
-                icon: const Icon(Icons.delete_outline),
-                label: const Text('Limpiar'),
               ),
-              FilledButton.icon(
+              TacticalButton(
+                compact: true,
+                label: '¡A la Batalla!',
+                icon: Icons.check_circle_outline,
+                accentColor: NavalPalette.radarGreen,
                 onPressed: _myBoard.allShipsPlaced ? _confirmReady : null,
-                icon: const Icon(Icons.check),
-                label: const Text('¡Listo!'),
               ),
             ],
-          )
-        else
+          ),
+        ] else
           const Padding(
-            padding: EdgeInsets.all(12),
-            child: CircularProgressIndicator(),
+            padding: EdgeInsets.all(10),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.5,
+                    color: NavalPalette.radarGreen,
+                  ),
+                ),
+                SizedBox(width: 12),
+                Text(
+                  'ESPERANDO AL OPONENTE...',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1.2,
+                    color: NavalPalette.radarGreen,
+                  ),
+                ),
+              ],
+            ),
           ),
       ],
     );
@@ -345,52 +637,68 @@ class _GameScreenState extends State<GameScreen> {
     return SingleChildScrollView(
       child: Column(
         children: [
-          const Text(
-            'TABLERO ENEMIGO (Toca para disparar)',
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.bold,
-              letterSpacing: 1,
-              color: Colors.amberAccent,
-            ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                Icons.gps_fixed,
+                size: 14,
+                color: _isMyTurn ? NavalPalette.tacticalAmber : Colors.white38,
+              ),
+              const SizedBox(width: 6),
+              Text(
+                _isMyTurn
+                    ? 'RADAR ENEMIGO — TOCA PARA DISPARAR'
+                    : 'RADAR ENEMIGO — ESPERANDO TURNO',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1.2,
+                  color: _isMyTurn ? NavalPalette.tacticalAmber : Colors.white54,
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 6),
           ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 360),
+            constraints: const BoxConstraints(maxWidth: 380),
             child: BoardWidget(
               board: _enemyBoard,
               showShips: false,
               interactive: _phase == _GamePhase.battle && _isMyTurn,
               onCellTap: _onEnemyCellTap,
+              targetedCell: _targetedCell,
+              lastShotCell: _lastMyShotOnEnemy,
             ),
           ),
-          const SizedBox(height: 16),
-          if (_phase == _GamePhase.finished) ...[
-            FilledButton.icon(
-              onPressed: _requestRematch,
-              icon: const Icon(Icons.replay),
-              label: const Text('Revancha'),
-            ),
-            const SizedBox(height: 16),
-          ],
-          const Text(
-            'TU FLOTA',
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.bold,
-              letterSpacing: 1,
-              color: Colors.white60,
-            ),
+          const SizedBox(height: 14),
+          const Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.shield, size: 13, color: NavalPalette.playerBlue),
+              SizedBox(width: 6),
+              Text(
+                'TU FLOTA',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1.2,
+                  color: NavalPalette.playerBlue,
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 6),
           ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 260),
+            constraints: const BoxConstraints(maxWidth: 270),
             child: BoardWidget(
               board: _myBoard,
               showShips: true,
               interactive: false,
+              lastShotCell: _lastEnemyShotOnMe,
             ),
           ),
+          const SizedBox(height: 12),
         ],
       ),
     );

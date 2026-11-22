@@ -18,6 +18,37 @@ class GameBoard {
   bool get allShipsSunk =>
       ships.isNotEmpty && ships.every((ship) => ship.isSunk);
 
+  int get hitSegmentsCount {
+    int count = 0;
+    for (int r = 0; r < kBoardSize; r++) {
+      for (int c = 0; c < kBoardSize; c++) {
+        if (grid[r][c] == CellState.hit || grid[r][c] == CellState.sunk) {
+          count++;
+        }
+      }
+    }
+    return count;
+  }
+
+  int get remainingSegments =>
+      (kTotalFleetSegments - hitSegmentsCount).clamp(0, kTotalFleetSegments);
+
+  int get sunkShipsCount => ships.where((s) => s.isSunk).length;
+
+  int get remainingShipsCount =>
+      (kFleetSpecs.length - sunkShipsCount).clamp(0, kFleetSpecs.length);
+
+  bool hasPlacedSpec(String specId) => ships.any((s) => s.spec.id == specId);
+
+  void removeShip(String specId) {
+    final idx = ships.indexWhere((s) => s.spec.id == specId);
+    if (idx == -1) return;
+    final ship = ships.removeAt(idx);
+    for (final (r, c) in ship.cells) {
+      grid[r][c] = CellState.empty;
+    }
+  }
+
   void clear() {
     for (int r = 0; r < kBoardSize; r++) {
       for (int c = 0; c < kBoardSize; c++) {
@@ -132,6 +163,29 @@ class GameBoard {
           if (r >= 0 && r < kBoardSize && c >= 0 && c < kBoardSize) {
             grid[r][c] = CellState.sunk;
           }
+        }
+        // Reveal the sunk enemy ship sprite on the tracking board.
+        final alreadyTracked = ships.any(
+          (s) => s.row == sunkRow && s.col == sunkCol && s.horizontal == sunkHorizontal,
+        );
+        if (!alreadyTracked) {
+          final usedIds = ships.map((s) => s.spec.id).toSet();
+          final spec = kFleetSpecs.firstWhere(
+            (s) => s.length == sunkLength && !usedIds.contains(s.id),
+            orElse: () => kFleetSpecs.firstWhere(
+              (s) => s.length == sunkLength,
+              orElse: () => kFleetSpecs.last,
+            ),
+          );
+          ships.add(
+            PlacedShip(
+              spec: spec,
+              row: sunkRow,
+              col: sunkCol,
+              horizontal: sunkHorizontal,
+              hits: Set<int>.from(List.generate(spec.length, (i) => i)),
+            ),
+          );
         }
       }
     }

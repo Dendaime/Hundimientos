@@ -16,6 +16,8 @@ class ShipSpec {
     required this.name,
     required this.length,
   });
+
+  String get spritePath => 'assets/images/ships/$id.png';
 }
 
 const List<ShipSpec> kFleetSpecs = [
@@ -26,6 +28,7 @@ const List<ShipSpec> kFleetSpecs = [
   ShipSpec(id: 'destroyer', name: 'Destructor', length: 2),
 ];
 
+const int kTotalFleetSegments = 17;
 const int kBoardSize = 10;
 
 class PlacedShip {
