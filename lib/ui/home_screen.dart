@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../audio/bgm_service.dart';
 import '../ble/transport.dart';
 import 'game_screen.dart';
 import 'lobby_screen.dart';
@@ -10,6 +11,22 @@ class HomeScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        actions: [
+          ValueListenableBuilder<bool>(
+            valueListenable: BgmService.instance.isMuted,
+            builder: (context, muted, _) {
+              return IconButton(
+                tooltip: muted ? 'Activar música' : 'Silenciar música',
+                icon: Icon(muted ? Icons.volume_off : Icons.volume_up),
+                onPressed: BgmService.instance.toggleMute,
+              );
+            },
+          ),
+        ],
+      ),
       body: SafeArea(
         child: Center(
           child: ConstrainedBox(

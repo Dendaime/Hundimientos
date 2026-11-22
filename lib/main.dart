@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'audio/bgm_service.dart';
 import 'ui/home_screen.dart';
 
 void main() {
@@ -7,8 +8,37 @@ void main() {
   runApp(const HundimientosApp());
 }
 
-class HundimientosApp extends StatelessWidget {
+class HundimientosApp extends StatefulWidget {
   const HundimientosApp({super.key});
+
+  @override
+  State<HundimientosApp> createState() => _HundimientosAppState();
+}
+
+class _HundimientosAppState extends State<HundimientosApp>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    BgmService.instance.start();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      BgmService.instance.pause();
+    } else if (state == AppLifecycleState.resumed) {
+      BgmService.instance.resume();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../audio/bgm_service.dart';
 import '../ble/protocol.dart';
 import '../ble/transport.dart';
 import '../game/game_board.dart';
@@ -215,6 +216,18 @@ class _GameScreenState extends State<GameScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.title),
+        actions: [
+          ValueListenableBuilder<bool>(
+            valueListenable: BgmService.instance.isMuted,
+            builder: (context, muted, _) {
+              return IconButton(
+                tooltip: muted ? 'Activar música' : 'Silenciar música',
+                icon: Icon(muted ? Icons.volume_off : Icons.volume_up),
+                onPressed: BgmService.instance.toggleMute,
+              );
+            },
+          ),
+        ],
       ),
       body: SafeArea(
         child: Padding(
